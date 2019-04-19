@@ -7,8 +7,6 @@ from pypokerengine.engine.deck import Deck
 from time import sleep
 from pypokerengine.engine.poker_constants import PokerConstants as Const
 from anytree import Node, Walker, RenderTree, ContStyle, search, LevelOrderIter
-from anytree.exporter import DictExporter, JsonExporter
-from anytree.importer import DictImporter, JsonImporter
 from pypokerengine.utils.card_utils import gen_cards, estimate_hole_card_win_rate
 from custom import helper_functions as helper
 
@@ -32,31 +30,18 @@ class NovicePlayer(BasePokerPlayer):
     #assume opponent action depend on his current observance of his own EHS
     #opponent must be consistent at least within 30 - 50 rounds
     self.raiseEHS = list()
-    self.raiseEHS.append(0)
+    self.raiseEHS.append(0) #will be dilute when the time it is used, used for testing purpose
     self.callEHS = list()
-    self.callEHS.append(0)
+    self.callEHS.append(0) #will be dilute when the time it is used, used for testing purpose
     self.action_sequence = str()
-    importer = JsonImporter()
-    
-    tree_json = open("tree.json", "r")
-    
-    if os.path.getsize("tree.json") > 0:  
-      data = importer.read(tree_json)
-      self.action_tree = importer.import_(data)
-    else:
-      print("generate_tree")
-      self.action_tree = SequenceActionTree()
-      self.action_tree.generate_tree(20)
-      # exporter = JsonExporter(indent=2, sort_keys=True)
-      # data = exporter.export(self.action_tree.root)
-      # tree_json = open("tree.json", "w")
-      # exporter.write(self.action_tree.root, tree_json)    
-    
+
+    print("generate_tree")
+    self.action_tree = SequenceActionTree()
+    self.action_tree.generate_tree(20)
+
     self.hole_card = None
     self.player_position = None
     self.player_uuid = None
-    self.total_decision = 0
-    self.adaptive_decision = 0
 
     #open precompute prob
     filename = "custom/prob.csv"
@@ -86,7 +71,7 @@ class NovicePlayer(BasePokerPlayer):
 
     self.update_lastest_history(round_state)
     current_node = self.action_tree.search_node_by_name(self.action_sequence)
-    self.total_decision += 1
+
     opp_model_action = None
     #fail safe in case tree construction have error
     if current_node == None:
@@ -94,9 +79,11 @@ class NovicePlayer(BasePokerPlayer):
       opp_model_action = None
     elif round_state['street'] != "preflop":
       cut_off_nodes = list(self.action_tree.all_leaf_node_need_eva(current_node, 1))
+      
       if self.action_tree.check_opp_model_availability(cut_off_nodes) == True:
+        
         print("declare using opp adaptive model") 
-        self.adaptive_decision += 1
+
         if round_state['street'] == "flop":
           prob_win = self.lookupProb(hole_card, round_state['community_card']) 
         else:
@@ -106,6 +93,7 @@ class NovicePlayer(BasePokerPlayer):
               hole_card=gen_cards(hole_card),
               community_card=gen_cards(round_state['community_card'])
           )
+
         opp_model_action = self.action_tree.declare_action(self.hole_card, current_node, 1, self.opp_model, round_state, cut_off_nodes, prob_win)
         for i in valid_actions:
           if i["action"] == opp_model_action:
@@ -141,12 +129,7 @@ class NovicePlayer(BasePokerPlayer):
       return action 
 
   def receive_game_start_message(self, game_info):
-    print(self.adaptive_decision, self.total_decision)
-    # exporter = JsonExporter(indent=2, sort_keys=True)
-    # data = exporter.export(self.action_tree.root)
-    # tree_json = open("tree.json", "w")
-    # exporter.write(self.action_tree.root, tree_json)
-
+    pass
 
   def receive_round_start_message(self, round_count, hole_card, seats):
     self.hole_card = hole_card
@@ -238,7 +221,7 @@ class NovicePlayer(BasePokerPlayer):
     self.opp_model[3] = raise_mean + raise_var
 
   def update_call_raise_EHS(self, round_state, street, pro_win_opp):
-    no_call_raise = self.number_of_raise_call_at_street(round_state, street)
+    no_call_raise = self.number_of_raise_call_at_street(round_state, street, 1)
     threshold = 1500
     forget = 20
 
@@ -256,7 +239,7 @@ class NovicePlayer(BasePokerPlayer):
       for i in range(forget):
         self.raiseEHS.pop(0)        
 
-  def number_of_raise_call_at_street(self, round_state, street):
+  def number_of_raise_call_at_street(self, round_state, street, player):
     c = 0
     r = 0
   
@@ -269,13 +252,22 @@ class NovicePlayer(BasePokerPlayer):
     elif street == 3:
       action_list = round_state['action_histories']['river']
     
-    for action in action_list:
-      if action['action'] == "RAISE" and action['uuid'] != self.player_uuid:
-        r += 1
-      elif action['action'] == "CALL" and action['uuid'] != self.player_uuid:
-        c += 1
-    if r == 2:
-      c -= 1
+    if player == 1: 
+      for action in action_list:
+        if action['action'] == "RAISE" and action['uuid'] != self.player_uuid:
+          r += 1
+        elif action['action'] == "CALL" and action['uuid'] != self.player_uuid:
+          c += 1
+      if r == 2:
+        c -= 1
+    else:
+      for action in action_list:
+        if action['action'] == "RAISE" and action['uuid'] == self.player_uuid:
+          r += 1
+        elif action['action'] == "CALL" and action['uuid'] == self.player_uuid:
+          c += 1
+      if r == 2:
+        c -= 1
     return (c, r)   
 
   #some weird key error here
@@ -453,6 +445,10 @@ class PlayerUtil:
     return numpy.var(data)
 
   @staticmethod
+  def calculate_std(data):
+    return numpy.std(data, dtype=numpy.float64)
+
+  @staticmethod
   def calculate_range(mean, var):
     return [int(mean - var), int(mean + var)]  
   # @staticmethod
@@ -462,7 +458,6 @@ class PlayerUtil:
 class HistoryCell:
   def __init__(self):
     self.prob_win_frequency_cell = list((0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-    #self.prob_win_frequency_cell = list(prob_win_frequency_cell)
     self.total_data_point = 0
     self.min_data_points = 5
 
@@ -503,6 +498,16 @@ class HistoryCell:
     raisePr = float(total)/self.total_data_point
 
     return [1 - callPr - raisePr, callPr, raisePr]
+
+  #currently using 1/3 of variance from mean, as value can be small than 0
+  def most_prob_range(self):
+    array = list()
+    for i in range(0,10):
+      array.append( (i/10.0) * self.prob_win_frequency_cell[i])
+    mean_array = PlayerUtil.calculate_mean(array)
+    var_array = PlayerUtil.calculate_var(array)
+    return [mean_array - var_array/3.0, mean_array + var_array/3.0]
+
 
 #This tree only need to follow normal rule and with these restriction
 #1. each player have max 4 number of raise
@@ -583,11 +588,21 @@ class SequenceActionTree:
               parent.eva += child.eva*pr_opp_action[1]  
     self.push_eva(current_node, parent_list, opp_model)
 
-
   def declare_action(self, hole_card, current_node, depth, opp_model, round_state, cut_off_nodes, prob_win):
     #compute evaluation for cutoff nodes
     for node in cut_off_nodes:
       if node.name[len(node.name) - 1] != "f":
+        #all variable here
+        our_prob_win = prob_win
+        opp_pro_win = node.history_cell.most_prob_range()
+
+        our_number_raise_at_street = 2 - node.parent.round_state.player_state.no_turn_raise[0]
+        opp_number_raise_at_street = 2 - node.parent.round_state.player_state.no_turn_raise[1] 
+        
+        opp_model = opp_model
+
+        current_pot_value = node.round_state.pot
+
         node.eva = 10#Evaluation funcion here
 
     self.push_eva(current_node, cut_off_nodes, opp_model)
